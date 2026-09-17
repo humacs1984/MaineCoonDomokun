@@ -1,0 +1,28 @@
+# Temp / intermediate
+_*/
+*.webm
+*.mp4
+backup/
+identity_candidates/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.spec.bak
+
+# OS
+Thumbs.db
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Large media (keep only final assets)
+*.avi
+*.mkv
+*.mov
