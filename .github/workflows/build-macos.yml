@@ -58,40 +58,8 @@ jobs:
           echo "Architecture: $(uname -m)"
           $HOME/build_env/bin/python -m PyInstaller --version
           $HOME/build_env/bin/python -m PyInstaller MaineCoonDomokun_mac.spec --noconfirm --clean 2>&1 | tee pyinstaller.log
-          # PyInstaller onedir may output dist/Name/ instead of dist/Name.app/
-          # If .app doesn't exist but directory does, wrap it into .app bundle
-          if [ ! -d "dist/MaineCoonDomokun.app" ] && [ -d "dist/MaineCoonDomokun" ]; then
-            echo "Wrapping dist/MaineCoonDomokun/ into .app bundle..."
-            mkdir -p "dist/MaineCoonDomokun.app/Contents/MacOS"
-            mkdir -p "dist/MaineCoonDomokun.app/Contents/Resources"
-            # Move all content into Contents
-            cp -R dist/MaineCoonDomokun/* dist/MaineCoonDomokun.app/Contents/MacOS/ 2>/dev/null || true
-            # Create Info.plist
-            cat > dist/MaineCoonDomokun.app/Contents/Info.plist << 'PLIST'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-            <key>CFBundleName</key><string>MaineCoonDomokun</string>
-            <key>CFBundleDisplayName</key><string>MaineCoonDomokun</string>
-            <key>CFBundleIdentifier</key><string>com.maine-coon.domokun</string>
-            <key>CFBundleVersion</key><string>1.0</string>
-            <key>CFBundleShortVersionString</key><string>1.0</string>
-            <key>CFBundleExecutable</key><string>MaineCoonDomokun</string>
-            <key>CFBundleIconFile</key><string>app.icns</string>
-            <key>CFBundlePackageType</key><string>APPL</string>
-            <key>NSHighResolutionCapable</key><true/>
-            <key>LSUIElement</key><true/>
-          </dict>
-          </plist>
-          PLIST
-            # Copy icon to Resources
-            cp app.icns dist/MaineCoonDomokun.app/Contents/Resources/ 2>/dev/null || true
-            # Remove the non-.app directory
-            rm -rf dist/MaineCoonDomokun
-          fi
-          ls -la dist/
           file "dist/MaineCoonDomokun.app/Contents/MacOS/MaineCoonDomokun" || true
+          # Check .app size — should be <80MB; if >150MB, heavy libs leaked in
           du -sh "dist/MaineCoonDomokun.app" || true
           echo "=== Top 20 largest files in .app ==="
           find dist/MaineCoonDomokun.app -type f -print0 | xargs -0 ls -lS 2>/dev/null | sort -rn -k5 | head -20 || true
