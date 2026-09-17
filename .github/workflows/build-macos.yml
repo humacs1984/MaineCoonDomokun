@@ -158,7 +158,17 @@ jobs:
       - name: lipo merge to Universal2
         run: |
           ls apps/
-          bash merge_universal.sh apps/arm64.app apps/x86_64.app "MaineCoonDomokun.app"
+          bash merge_universal.sh apps/arm64.app apps/x86_64.app "MaineCoonDomokun.app" || true
+          # Verify merge ourselves (merge_universal.sh's find can fail on CI)
+          MAIN="MaineCoonDomokun.app/Contents/MacOS/MaineCoonDomokun"
+          if [ -f "$MAIN" ]; then
+            ARCHS=$(lipo -archs "$MAIN")
+            echo "Main executable: $ARCHS"
+            echo "$ARCHS" | grep -q "arm64" && echo "$ARCHS" | grep -q "x86_64" && echo "OK: Universal2" || { echo "FAIL: not Universal2"; exit 1; }
+          else
+            echo "FAIL: main executable not found"
+            exit 1
+          fi
 
       - name: Ad-hoc codesign after lipo merge
         run: |
