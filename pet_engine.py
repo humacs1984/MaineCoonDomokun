@@ -734,19 +734,13 @@ class SpriteBank:
         Lift values are body_bottoms (ints); final lift (0..1 float) set in _on_lazy_done after all frames arrive.
         During loading, lift_map holds body_bottoms — _state_draw uses lift_map only for run gallop,
         temporary int values cause no visual glitch (idle/walk/etc have var<30 → lift=0.0).
-        v118: Reject stale chunks — if a zoom change replaced the bank, old _StateLoadThread
-        may still emit chunks at the old draw_size. Appending wrong-size frames causes
-        draw_rect jitter (cat appears to grow/shrink). Drop stale chunks silently."""
+        v118: Skip if this bank was cancelled (replaced by zoom/fullbank swap). Old _StateLoadThread
+        may still emit chunks at the old draw_size — appending them would mix frame sizes → jitter."""
+        if getattr(self, '_cancelled', False):
+            return
         bank = self
         while getattr(bank, '_replaced_by', None) is not None:
             bank = bank._replaced_by
-        # v118: Reject stale chunks from old draw_size
-        if new_imgs and hasattr(bank, 'draw_size') and bank.draw_size > 0:
-            # Check first frame's height against expected frame height for current draw_size
-            expected_h = bank._state_draw(state) if state in bank.TIGHT else bank.draw_size
-            if abs(new_imgs[0].height() - expected_h) > max(2, expected_h * 0.05):
-                # Stale chunk from old zoom — silently drop
-                return
         existing = bank.frames.get(state, [])
         existing_lift = bank.lift_map.get(state, [])
         old_count = len(existing)
@@ -771,6 +765,9 @@ class SpriteBank:
 
     def _on_lazy_done(self, state, t):
         self._lazy_threads.pop(state, None)
+        # v118: Skip if bank was cancelled (zoom/fullbank swap replaced it)
+        if getattr(self, '_cancelled', False):
+            return
         # v112: Incremental mode — frames already appended via _on_chunk_ready.
         # Recalculate lift_map from collected body_bottoms → proper 0..1 floats.
         bank = self
@@ -1725,6 +1722,7 @@ class PetWindow(QWidget):
             old.pixmaps.clear()
             old.pixmaps_m.clear()
             old._replaced_by = new   # v94-fix: In-flight lazy load write-back routes to latest bank
+            old._cancelled = True    # v118: reject stale chunks from this old bank
             self.bank = new
             self.bank.on_state_reloaded = self._on_state_reloaded
             self.bank.on_chunk_appended = self._on_chunk_appended
@@ -1760,6 +1758,7 @@ class PetWindow(QWidget):
         self.bank.pixmaps.clear()
         self.bank.pixmaps_m.clear()
         self.bank._replaced_by = new   # v94-fix: In-flight lazy load write-back routes to latest bank
+        self.bank._cancelled = True    # v118: reject stale chunks from this old bank
         self.bank = new
         # v96-fix: No frame_idx/anim_elapsed reset - bank swap is now transparent
         # (fast_boot loads full 121 frames, swap replaces with identical data)
