@@ -74,6 +74,25 @@ POSES = {
         'giant tub, huge tub, '
         'obese, bloated'
     ),
+    'pet': (
+        ' ONE single tail only. Sitting calmly in a gentle three-quarter view. '
+        'A single human right hand is ALREADY RESTING on top of the head — palm down, '
+        'fingers gently curved, fingertips touching the fur between the ears from the '
+        'very first frame. The hand enters from the upper right, wrist and forearm '
+        'visible at the frame edge. The cat has a contented blissful expression: '
+        'eyes closed, ears relaxed back into the petting hand. '
+        'Exactly four legs. '
+        'Dark navy blue studio background (color #000D43). '
+        'The subject (cat + hand) takes up about 45 percent of frame height.',
+        ', fluffy, shaggy, messy fur, flyaway hairs, '
+        'two tails, extra tail, second tail, double tail, forked tail, split tail, '
+        'duplicated tail, extra legs, five legs, '
+        'without vest, vest removed, '
+        'biting hand, licking hand, teeth, fearful, scared, cowering, '
+        'aggressive, growling, two hands, multiple hands, hand under chin, '
+        'hand entering from left, hand from below, '
+        'obese, bloated'
+    ),
 }
 
 # ── Darkblue border removal (from golden_vest_pet) ──

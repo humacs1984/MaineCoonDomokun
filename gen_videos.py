@@ -19,7 +19,7 @@ FRONT_VIEW = {'idle', 'sit', 'surprised', 'wave', 'beg', 'dance', 'pet'}
 SIDE_VIEW = {'walk', 'run', 'eat', 'bark', 'happy', 'lick', 'stretch'}
 DOWN_VIEW = {'sleep', 'roll', 'play_dead'}
 # Per-action special ref images (t2i generated with prop in frame)
-SPECIAL_REFS = {'eat': 'ref_eat.png', 'type': 'ref_type.png', 'bath': 'ref_bath.png', 'walk': 'ref_walk.png'}
+SPECIAL_REFS = {'eat': 'ref_eat.png', 'type': 'ref_type.png', 'bath': 'ref_bath.png', 'walk': 'ref_walk.png', 'pet': 'ref_pet.png'}
 
 def get_ref(name):
     # Special ref (with prop) takes priority
@@ -370,19 +370,19 @@ ACTIONS = {
     ),
     # --- INTERACTIVE: pet (front three-quarter, human hand) ---
     'pet': (
-        ' TINY CAT SEEN FROM VERY FAR AWAY, extreme wide shot. It sits calmly in a gentle three-quarter view, '
-        'A single human hand reaches in from above and slowly strokes the top of its head '
-        'and between its ears in repeated gentle petting motions; the cat leans its head '
-        'into the palm, enjoying the petting, body staying compact '
-        'in the same spot the whole time. '
-        'The subject takes up less than 35 percent of the frame height. '
-        'FULL BODY VISIBLE AT ALL TIMES. '
-        'Contented blissful petting expression: eyes closed in pure bliss with slow '
-        'dreamy blinks, mouth curled in a tiny satisfied smile, ears relaxing back '
-        'softly into the petting hand, face radiating warm grateful happiness '
-        'and total trust.',
-        ', biting hand, licking hand, teeth, fearful, scared, cowering, '
+        ' ONE single tail only. TINY CAT SEEN FROM VERY FAR AWAY, extreme wide shot. '
+        'It sits calmly in a gentle three-quarter view, eyes closed with a content '
+        'relaxed happy expression. The body is compact and well-proportioned. '
+        'A single human hand is ALREADY RESTING on top of its head from the very first '
+        'frame — palm down on the crown, fingers gently curved between the ears — and '
+        'slowly strokes in repeated gentle petting motions; the cat leans its head '
+        'into the palm, ears relaxing back, enjoying the petting, body staying compact '
+        'in the same spot the whole time. The hand NEVER leaves the head. '
+        'The subject takes up less than 35 percent of the frame height.',
+        ', biting hand, licking hand, mouth open, teeth, fearful, scared, cowering, '
         'aggressive, growling, two hands, multiple hands, hand under chin, '
+        'hand entering from left, hand from below, hand disappearing, '
+        'two tails, extra tail, second tail, double tail, forked tail, split tail, '
         'slim, lean, stretched tall, thin body, elongated body, long thin legs, '
         'skinny cat, tall cat, narrow chest, narrow body, '
         'five legs, extra legs'

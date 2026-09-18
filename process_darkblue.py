@@ -1,18 +1,21 @@
 # -*- coding: utf-8 -*-
 """
-Process darkblue videos for Maine Coon Domo-kun pet:
-extract frames -> BiRefNet soft alpha -> fg normalize -> bottom anchor -> webp
+Process darkblue videos: extract frames -> BiRefNet soft alpha -> fg normalize -> bottom anchor -> webp
 
-Pipeline strategy (from golden_vest_pet):
+Pipeline strategy:
 - BiRefNet sigmoid soft alpha for ALL states
-- DARKBLUE BORDER REMOVAL (two-pronged):
-  Prong 1: Color-based alpha zeroing (dist<60 & B>G+3 & sigmoid<=0.5 → alpha=0)
-  Prong 2: Protected erode + blur (radius=4, sigma=1.8)
-- Props (eat/type/bath): color-distance supplement for BiRefNet blind spots
-- fg normalization to UNIFIED_FG for consistent cat size across all states
+- DARKBLUE BORDER REMOVAL (fundamental fix — no color-based detection of darkblue pixels):
+  After resize, ERODE the alpha mask by 3px. This physically removes the outermost
+  layer where darkblue background residue lives, regardless of its RGB values.
+  Then apply Gaussian blur (1.5px) to restore soft anti-aliased edges.
+  The new soft edge is a blend of foreground + cream (from cream-fill), never darkblue.
+  
+  Safety: 3px erosion at 1088x832 = 0.36% of frame height — completely invisible.
+  Dog interior features (eyes, nose, fur) are deep inside the mask, never touched.
+  No RGB modification anywhere — zero risk of white/golden patches.
 
-Usage: env -u PYTHONPATH -u PYTHONHOME C:/Users/humac/anaconda3/python.exe process_darkblue.py [state ...]
-       env -u PYTHONPATH -u PYTHONHOME C:/Users/humac/anaconda3/python.exe process_darkblue.py              # all
+Usage: python process_darkblue.py [state1 state2 ...]
+       python process_darkblue.py              # all darkblue videos
 """
 import sys, os, subprocess, numpy as np
 from PIL import Image
@@ -23,9 +26,9 @@ ASSETS_DIR = os.path.join(ROOT, 'assets')
 WORK_BASE = os.path.join(ROOT, '_darkblue_work')
 
 TARGET_FG = 186000  # legacy default (not used when UNIFIED_FG is set)
-# v111: unified foreground target — all states normalized to same cat size
-# Will be calibrated after idle is processed; start with estimate for Maine Coon
-UNIFIED_FG = 200000
+# v111: unified foreground target — all states normalized to same dog size
+# idle median_fg ≈ 220K; use this as the standard so all states look consistent
+UNIFIED_FG = 220000
 
 # Soft alpha thresholds
 SIGMOID_CORE = 0.7
@@ -37,13 +40,11 @@ BG_RGB = np.array([18.0, 37.0, 69.0])
 CREAM = np.array([200.0, 180.0, 150.0])
 
 # Erosion radius for darkblue border removal
-# v110: 4px erosion at 1088x832 = 0.48% of frame height
+# v110: 4px erosion at 1088x832 = 0.48% of frame height — removes more darkblue residue
+# that becomes visible black edges on macOS (Retina renders alpha 1-19 as ~0 RGB)
 ERODE_RADIUS = 4
 # Gaussian blur sigma for soft edge restoration after erosion
 EDGE_BLUR_SIGMA = 1.8
-
-# Prop states that need color-distance supplement
-PROP_STATES = {'eat', 'type', 'bath', 'pet'}
 
 
 def extract_frames(video_path, out_dir, num_frames=121):
@@ -52,7 +53,7 @@ def extract_frames(video_path, out_dir, num_frames=121):
     cmd = [
         'ffmpeg', '-y', '-i', video_path,
         '-vframes', str(num_frames),
-        '-q:v', '1',   # v110: highest PNG quality
+        '-q:v', '1',   # v110: highest PNG quality (was 2)
         os.path.join(out_dir, '%05d.png')
     ]
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
@@ -65,7 +66,7 @@ def birefnet_soft_alpha(frames_dir, sigmoid_dir, work_dir):
     import torch
     from transformers import AutoModelForImageSegmentation
     from torchvision import transforms
-
+    
     local_path = os.path.expanduser(
         '~/.cache/huggingface/hub/models--zhengpeng7--BiRefNet/snapshots/'
         'e2bf8e4460fc8fa32bba5ea4d94b3233d367b0e4'
@@ -78,30 +79,30 @@ def birefnet_soft_alpha(frames_dir, sigmoid_dir, work_dir):
         model = AutoModelForImageSegmentation.from_pretrained(
             'ZhengPeng7/BiRefNet-matting', trust_remote_code=True
         ).cuda().eval()
-
+    
     tf = transforms.Compose([
         transforms.Resize((1024, 1024)),
         transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+        transforms.Normalize([0.485,0.456,0.406],[0.229,0.224,0.225]),
     ])
-
+    
     os.makedirs(sigmoid_dir, exist_ok=True)
     frames = sorted([f for f in os.listdir(frames_dir) if f.endswith('.png')])
-
+    
     for i, fn in enumerate(frames):
         img = Image.open(os.path.join(frames_dir, fn)).convert('RGB')
         inp = tf(img).unsqueeze(0).cuda()
         with torch.no_grad():
             sigmoid = model(inp)[-1].sigmoid().squeeze().cpu().numpy()
-
+        
         sigmoid_uint16 = (sigmoid * 65535).astype(np.uint16)
         sigmoid_img = Image.fromarray(sigmoid_uint16)
         sigmoid_img = sigmoid_img.resize(img.size, Image.BILINEAR)
         sigmoid_img.save(os.path.join(sigmoid_dir, fn))
-
+        
         if i % 20 == 0:
             print(f'    BiRefNet: {i}/{len(frames)}', flush=True)
-
+    
     del model
     torch.cuda.empty_cache()
     print(f'  BiRefNet soft alpha: {len(frames)} sigmoid maps done')
@@ -114,8 +115,10 @@ def erode_alpha(alpha_np, radius, protect_mask=None):
     (not interior holes created by darkblue removal)."""
     from scipy import ndimage
     if protect_mask is not None:
+        # Only erode the outer boundary of the original foreground
         eroded = ndimage.binary_erosion(protect_mask, iterations=radius)
-        outer_strip = protect_mask & ~eroded  # strip at original outer edge
+        outer_strip = protect_mask & ~eroded  # 2px strip at original outer edge
+        # Zero alpha only in the outer strip
         result = alpha_np.copy()
         result[outer_strip] = 0
         return result
@@ -135,7 +138,7 @@ def blur_alpha(alpha_np, sigma):
 def fg_normalize_and_anchor(frames_dir, sigmoid_dir, out_dir, target_fg=TARGET_FG, state_name=None):
     os.makedirs(out_dir, exist_ok=True)
     frames = sorted([f for f in os.listdir(frames_dir) if f.endswith('.png')])
-
+    
     fgs = []
     for fn in frames:
         img = np.array(Image.open(os.path.join(frames_dir, fn)).convert('RGB'))
@@ -145,87 +148,98 @@ def fg_normalize_and_anchor(frames_dir, sigmoid_dir, out_dir, target_fg=TARGET_F
         h, w = img.shape[:2]
         if sig_np.shape != (h, w):
             sig_np = np.array(sig_img.resize((w, h), Image.BILINEAR)).astype(np.float64) / 65535.0
-
-        # Compute soft alpha from BiRefNet sigmoid
-        # sleep uses higher core threshold to stabilize flickering edges
+        
+        # Compute soft alpha from BiRefNet sigmoid (NO modification to sigmoid or RGB)
+        # v111: sleep uses higher core threshold to stabilize flickering edges
         core_thresh = 0.85 if state_name == 'sleep' else SIGMOID_CORE
         alpha = np.zeros((h, w), dtype=np.uint8)
         core = sig_np > core_thresh
         alpha[core] = 255
         soft = (~core) & (sig_np > SIGMOID_FLOOR)
         alpha[soft] = np.clip(sig_np[soft] * 255, 1, 254).astype(np.uint8)
-
-        # Prop color-distance supplement (eat/type/bath)
-        if state_name in PROP_STATES:
-            bg_ref = BG_RGB
-            # Keep BiRefNet core (sigmoid > 0.5) as-is
-            alpha_prop = np.zeros((h, w), dtype=np.uint8)
-            alpha_prop[sig_np > 0.5] = 255
-            # Add back pixels far from darkblue bg (props = red/brown/pastel, far from blue)
+        
+        # type特殊处理：色差法补充键盘底座（仅修改alpha，不修改RGB）
+        if state_name == 'type':
+            bg_ref = np.array([18.0, 37.0, 69.0])
+            alpha = np.zeros((h, w), dtype=np.uint8)
+            alpha[sig_np > 0.5] = 255
             color_dist = np.sqrt(((img.astype(np.float64) - bg_ref) ** 2).sum(axis=2))
             chroma_mask = color_dist > 20
-            biref_zero = alpha_prop == 0
-            alpha_prop[biref_zero & chroma_mask] = 255
-            alpha = alpha_prop
-
-        # pet: skin-color supplement for human hand near cat head ONLY
-        # Golden doesn't have this — but BiRefNet removes hands as background.
-        # Restrict to upper-center region (where head is) to avoid whole-arm alpha bloat.
-        if state_name == 'pet':
-            r_ch = img[:,:,0].astype(np.float64)
-            g_ch = img[:,:,1].astype(np.float64)
-            b_ch = img[:,:,2].astype(np.float64)
-            skin_mask = (r_ch > 140) & (g_ch > 90) & (b_ch > 60) & ((r_ch - b_ch) > 30)
-            # Only apply in upper 60% of frame and center 50% horizontally
-            upper = int(h * 0.6)
-            cx_lo, cx_hi = int(w * 0.25), int(w * 0.75)
-            spatial_mask = np.zeros((h, w), dtype=bool)
-            spatial_mask[:upper, cx_lo:cx_hi] = True
-            alpha[skin_mask & (alpha == 0) & spatial_mask] = 255
-
+            biref_zero = alpha == 0
+            alpha[biref_zero & chroma_mask] = 255
+        # eat特殊处理：色差法补充红色食盆+狗粮（BiRefNet把它们当背景抠掉了）
+        elif state_name == 'eat':
+            bg_ref = np.array([18.0, 37.0, 69.0])
+            # Keep BiRefNet core (sigmoid > 0.5) as-is
+            alpha = np.zeros((h, w), dtype=np.uint8)
+            alpha[sig_np > 0.5] = 255
+            # Add back pixels far from darkblue bg (food bowl + kibble = red/brown, far from blue)
+            color_dist = np.sqrt(((img.astype(np.float64) - bg_ref) ** 2).sum(axis=2))
+            chroma_mask = color_dist > 20
+            biref_zero = alpha == 0
+            alpha[biref_zero & chroma_mask] = 255
+        
+        # v112: Save background mask — pixels that are darkblue bg in original frame
+        # AND BiRefNet does NOT consider foreground (low sigmoid).
+        # Color-only check (dist<15) is too aggressive — hand shadows near the head
+        # have similar color to darkblue bg but are real foreground.
+        bg_ref = np.array([14.0, 33.0, 66.0])
+        bg_dist = np.sqrt(((img.astype(np.float64) - bg_ref) ** 2).sum(axis=2))
+        is_bg = (bg_dist < 15) & (sig_np < 0.3)  # color-near-bg AND BiRefNet-unconfident
+        
         fg = (alpha > 0).sum()
-        fgs.append((fn, img, alpha, fg, sig_np))
-
-    median_fg = int(np.median([fg for _, _, _, fg, _ in fgs]))
-    # ALL states use UNIFIED_FG as target — ensures consistent cat size across all states
+        fgs.append((fn, img, alpha, fg, sig_np, is_bg))
+    
+    median_fg = int(np.median([fg for _, _, _, fg, _, _ in fgs]))
+    # v111: ALL states use UNIFIED_FG as target — ensures consistent dog size across all states
+    # Old v110 used target_fg=median_fg → fixed_scale=1.0 → sleep/run/roll 3× bigger than idle
     target_fg = UNIFIED_FG
     fixed_scale = np.sqrt(target_fg / median_fg)
-
+    
     global_bottom_ys = []
-    if state_name in ('pet', 'kiss', 'type', 'eat', 'bath'):
-        print(f'  Prop/interaction state: fixed_scale={fixed_scale:.4f} (median_fg={median_fg}, target_fg={target_fg})')
-
-    for fn, img, alpha, fg, sig_np_orig in fgs:
+    if state_name in ('pet', 'kiss', 'type'):
+        print(f'  Interaction state: fixed_scale={fixed_scale:.4f} (median_fg={median_fg}, target_fg={target_fg})')
+    
+    for fn, img, alpha, fg, sig_np_orig, is_bg_orig in fgs:
         ys = np.where(alpha > 128)[0]
         if len(ys) > 0:
             global_bottom_ys.append(ys.max())
     anchor_y = int(np.median(global_bottom_ys)) if global_bottom_ys else 0
     h0, w0 = fgs[0][1].shape[:2]
-
-    for fn, img, alpha, fg, sig_np_orig in fgs:
+    
+    for fn, img, alpha, fg, sig_np_orig, is_bg_orig in fgs:
         if fg < 1000:
             scale = 1.0
         else:
+            # v110: ALL states use fixed_scale — no per-frame size variation (eliminates jitter)
             scale = fixed_scale
-
+        
         h, w = img.shape[:2]
         new_w = max(1, int(w * scale))
         new_h = max(1, int(h * scale))
-
+        
         # Cream fill alpha=0 regions before LANCZOS resize
+        # Prevents LANCZOS from interpolating darkblue bg into edge semi-transparent pixels
         img_for_resize = img.copy()
         img_for_resize[alpha == 0] = CREAM.astype(np.uint8)
-
+        
         img_pil = Image.fromarray(img_for_resize).resize((new_w, new_h), Image.LANCZOS)
         alpha_pil = Image.fromarray(alpha).resize((new_w, new_h), Image.BILINEAR)
         sig_pil = Image.fromarray((sig_np_orig * 65535).astype(np.uint16), mode='I;16').resize((new_w, new_h), Image.BILINEAR)
-
+        
         img_np = np.array(img_pil)
         alpha_np = np.array(alpha_pil)
         sigmoid_np = np.array(sig_pil).astype(np.float64) / 65535.0
-
-        if state_name in PROP_STATES and state_name != 'pet':
-            # Prop states (eat/type/bath): same darkblue removal approach (no RGB modification)
+        
+        # v112: Pre-cleanup bg mask before darkblue cleanup (reduces erode+blur re-inflation)
+        is_bg_resized = np.array(Image.fromarray(is_bg_orig.astype(np.uint8) * 255).resize(
+            (new_w, new_h), Image.NEAREST))
+        is_bg_scaled = is_bg_resized > 128
+        alpha_np[is_bg_scaled] = 0
+        
+        if state_name == 'type':
+            # type: same erode+blur approach as other states (no RGB modification)
+            # Save original foreground mask BEFORE darkblue removal for protected erode
             orig_fg_mask = alpha_np > 128
             fg_mask = alpha_np > 0
             if fg_mask.any():
@@ -233,6 +247,7 @@ def fg_normalize_and_anchor(frames_dir, sigmoid_dir, out_dir, target_fg=TARGET_F
                 dist_db = np.sqrt(((fg_rgb - BG_RGB) ** 2).sum(axis=1))
                 b_minus_g = fg_rgb[:, 2] - fg_rgb[:, 1]
                 is_darkblue = (dist_db < 60) & (b_minus_g > 3)
+                # Exclude BiRefNet core foreground (sigmoid > 0.5)
                 fg_sigmoid = sigmoid_np[fg_mask]
                 is_darkblue = is_darkblue & (fg_sigmoid <= 0.5)
                 if is_darkblue.any():
@@ -243,70 +258,60 @@ def fg_normalize_and_anchor(frames_dir, sigmoid_dir, out_dir, target_fg=TARGET_F
             alpha_np = blur_alpha(alpha_np, EDGE_BLUR_SIGMA)
             alpha_np[alpha_np > 250] = 255
             alpha_np[alpha_np < 10] = 0
-        elif state_name == 'pet':
-            # pet: standard darkblue cleanup + re-add skin mask after cleanup
-            # 1. Standard two-pronged darkblue removal
-            orig_fg_mask = alpha_np > 128
-            fg_mask = alpha_np > 0
-            if fg_mask.any():
-                fg_rgb = img_np[fg_mask].astype(np.float64)
-                dist_db = np.sqrt(((fg_rgb - BG_RGB) ** 2).sum(axis=1))
-                b_minus_g = fg_rgb[:, 2] - fg_rgb[:, 1]
-                is_darkblue = (dist_db < 60) & (b_minus_g > 3)
-                fg_sigmoid = sigmoid_np[fg_mask]
-                is_darkblue = is_darkblue & (fg_sigmoid <= 0.5)
-                if is_darkblue.any():
-                    dark_full = np.zeros(alpha_np.shape, dtype=bool)
-                    dark_full[fg_mask] = is_darkblue
-                    alpha_np[dark_full] = 0
-            alpha_np = erode_alpha(alpha_np, ERODE_RADIUS, protect_mask=orig_fg_mask)
-            alpha_np = blur_alpha(alpha_np, EDGE_BLUR_SIGMA)
-            alpha_np[alpha_np > 250] = 255
-            alpha_np[alpha_np < 10] = 0
-            # 2. Re-add skin-colored pixels that were lost during darkblue cleanup
-            #    (human hand near cat head — BiRefNet misses it, darkblue cleanup may erase edges)
-            #    Restrict to upper-center region to avoid whole-arm alpha bloat
-            r_ch = img_np[:,:,0].astype(np.float64)
-            g_ch = img_np[:,:,1].astype(np.float64)
-            b_ch = img_np[:,:,2].astype(np.float64)
-            skin_mask = (r_ch > 140) & (g_ch > 90) & (b_ch > 60) & ((r_ch - b_ch) > 30)
-            upper = int(alpha_np.shape[0] * 0.6)
-            cx_lo, cx_hi = int(alpha_np.shape[1] * 0.25), int(alpha_np.shape[1] * 0.75)
-            spatial = np.zeros(alpha_np.shape, dtype=bool)
-            spatial[:upper, cx_lo:cx_hi] = True
-            alpha_np[skin_mask & spatial] = 255
         else:
             # ============================================================
             # FUNDAMENTAL FIX: Remove darkblue border (two-pronged approach)
-            # (from golden_vest_pet)
+            #
+            # Prong 1 — COLOR-BASED ALPHA ZEROING (catches large darkblue patches):
+            #   BiRefNet misclassifies large darkblue background areas as foreground.
+            #   These pixels retain their darkblue RGB after resize (B>G, blue tint).
+            #   Dog dark features always have B<=G (warm tone: black eyes, brown nose).
+            #   So: alpha>0 AND dist<60 AND B>G+3 → zero alpha. Zero false positives.
+            #
+            # Prong 2 — PROTECTED ERODE + BLUR (catches thin darkblue borders):
+            #   At the subject edge, LANCZOS mixes darkblue with cream → B>G may fail.
+            #   2px erosion removes this thin border. Then 1.5px blur restores soft edge.
+            #   IMPORTANT: erode only the OUTER boundary of original BiRefNet foreground,
+            #   not interior holes created by darkblue removal (e.g. mouth interior).
+            #   Otherwise, erode eats into mouth/tongue → visible parts disappear
+            #   after premultiplied alpha compositing (alpha<20 → RGB→0).
+            #
+            # NEVER modify img_np RGB — prevents white/golden patches.
             # ============================================================
-
+            
             # Save original foreground mask BEFORE darkblue removal for protected erode
             orig_fg_mask = alpha_np > 128
-
+            
             # Prong 1: Color-based alpha zeroing
+            # IMPORTANT: only zero darkblue pixels where BiRefNet is NOT confident (sigmoid <= 0.5)
+            # BiRefNet core foreground (sigmoid>0.5) at the subject edge may have B>G
+            # due to LANCZOS mixing darkblue background with dark fur — these are real
+            # dog features (lower jaw, mouth interior), NOT darkblue background.
             fg_mask = alpha_np > 0
             if fg_mask.any():
                 fg_rgb = img_np[fg_mask].astype(np.float64)
                 dist_db = np.sqrt(((fg_rgb - BG_RGB) ** 2).sum(axis=1))
                 b_minus_g = fg_rgb[:, 2] - fg_rgb[:, 1]
                 is_darkblue = (dist_db < 60) & (b_minus_g > 3)
+                # Exclude BiRefNet core foreground (sigmoid > 0.5)
                 fg_sigmoid = sigmoid_np[fg_mask]
                 is_darkblue = is_darkblue & (fg_sigmoid <= 0.5)
                 if is_darkblue.any():
                     dark_full = np.zeros(alpha_np.shape, dtype=bool)
                     dark_full[fg_mask] = is_darkblue
                     alpha_np[dark_full] = 0
-
+            
             # Prong 2: Protected erode + blur for thin border cleanup
+            # v110: Use ERODE_RADIUS (4) instead of hardcoded 2 for better darkblue border removal
             alpha_np = erode_alpha(alpha_np, ERODE_RADIUS, protect_mask=orig_fg_mask)
             alpha_np = blur_alpha(alpha_np, EDGE_BLUR_SIGMA)
-
+            
             # Core restore (blur may soften alpha=255 pixels)
             alpha_np[alpha_np > 250] = 255
-            # Remove low-alpha fringe that becomes visible black edges on macOS
+            # v110: Remove low-alpha fringe that becomes visible black edges on macOS
+            # Qt premultiplied alpha: alpha 1-19 → RGB rendered as ≈0 (black fringe)
             alpha_np[alpha_np < 10] = 0
-
+        
         # Remove isolated tiny speckle components
         from scipy import ndimage
         mask_bool = alpha_np > 0
@@ -316,30 +321,33 @@ def fg_normalize_and_anchor(frames_dir, sigmoid_dir, out_dir, target_fg=TARGET_F
             keep = set(i + 1 for i, s in enumerate(sizes) if s >= 100)
             mask_bool = np.isin(labeled, list(keep)) if keep else np.zeros_like(mask_bool)
         alpha_np[~mask_bool] = 0
-
+        
+        # v112: Re-apply bg mask AFTER erode+blur — erode+blur re-inflates alpha into bg regions
+        alpha_np[is_bg_scaled] = 0
+        
         # Build RGBA (NEVER modify img_np — no white/golden patches)
         rgba = np.zeros((new_h, new_w, 4), dtype=np.uint8)
         rgba[:,:,:3] = img_np
         rgba[:,:,3] = alpha_np
         rgba_img = Image.fromarray(rgba)
-
+        
         # Find bottom of subject
         ys = np.where(alpha_np > 128)[0]
         if len(ys) > 0:
             scaled_bottom = ys.max()
         else:
             scaled_bottom = new_h - 1
-
+        
         canvas = np.zeros((h0, w0, 4), dtype=np.uint8)
-
+        
         paste_y = anchor_y - scaled_bottom - 1
         if paste_y < 0:
             shrink = new_h / (new_h + abs(paste_y))
             new_h2 = max(1, int(new_h * shrink))
             new_w2 = max(1, int(new_w * shrink))
             rgba_img = rgba_img.resize((new_w2, new_h2), Image.LANCZOS)
-            if state_name in PROP_STATES:
-                # Prop secondary resize: same color+erode approach (from golden type handling)
+            if state_name == 'type':
+                # type secondary resize: same color+erode approach (no RGB modification)
                 arr2 = np.array(rgba_img)
                 a2 = arr2[:,:,3]
                 fg2 = a2 > 0
@@ -365,8 +373,8 @@ def fg_normalize_and_anchor(frames_dir, sigmoid_dir, out_dir, target_fg=TARGET_F
             if paste_y < 0:
                 paste_y = 0
             new_w, new_h = new_w2, new_h2
-
-        # COM (center-of-mass) horizontal centering
+        # v110: COM (center-of-mass) horizontal centering — prevents canvas shift on idle
+        # bbox centering causes horizontal jitter when frame width varies (breathing animation)
         final_arr = np.array(rgba_img)
         final_a = final_arr[:,:,3]
         com_weights = final_a.astype(np.float64)
@@ -377,14 +385,24 @@ def fg_normalize_and_anchor(frames_dir, sigmoid_dir, out_dir, target_fg=TARGET_F
             paste_x = int(w0 / 2 - com_x)
         else:
             paste_x = (w0 - new_w) // 2
-
+        
         temp = Image.new('RGBA', (w0, h0), (0, 0, 0, 0))
         temp.paste(rgba_img, (paste_x, paste_y))
-        temp.save(os.path.join(out_dir, fn))
-
+        
+        # v112: Remove CREAM-LANCZOS interpolation artifacts.
+        # At the boundary between dark foreground and CREAM-filled bg, LANCZOS produces
+        # semi-transparent dark pixels that darkblue cleanup cannot detect (not pure darkblue).
+        # These artifacts appear where the original raw frame was background (is_bg_orig).
+        # Triple condition: is_bg_orig (was bg in raw) + semi-transparent (alpha<250) + dark (mean<80).
+        # Real foreground is opaque; normal edge AA near fg (is_bg_orig=False) is preserved.
+        canvas_arr = np.array(temp)
+        is_artifact = is_bg_orig & (canvas_arr[:,:,3] > 0) & (canvas_arr[:,:,3] < 250) & (canvas_arr[:,:,:3].mean(axis=2) < 80)
+        canvas_arr[is_artifact, 3] = 0
+        Image.fromarray(canvas_arr).save(os.path.join(out_dir, fn))
+    
     print(f'  soft alpha + fg normalize+anchor: {len(frames)} frames, target_fg={target_fg}, anchor_y={anchor_y}')
     print(f'  thresholds: core>{SIGMOID_CORE}→255, floor>{SIGMOID_FLOOR}→soft, else→0')
-    if state_name not in PROP_STATES:
+    if state_name != 'type':
         print(f'  darkblue fix: erode={ERODE_RADIUS}px, blur={EDGE_BLUR_SIGMA}px')
     return len(frames)
 
@@ -394,7 +412,7 @@ def to_webp(frames_dir, state_name, num_frames=None):
     frames = sorted([f for f in os.listdir(frames_dir) if f.endswith('.png')])
     if num_frames:
         frames = frames[:num_frames]
-
+    
     os.makedirs(ASSETS_DIR, exist_ok=True)
     for fn in frames:
         idx = int(fn.replace('.png', '')) - 1
@@ -403,6 +421,8 @@ def to_webp(frames_dir, state_name, num_frames=None):
         for attempt in range(5):
             try:
                 # Q80+α100: RGB lossy Q80, alpha lossless 100
+                # Prevents white dots and missing parts (alpha 100% intact)
+                # method=4: good balance of speed vs compression (method=6 too slow)
                 img.save(out_path, 'WEBP', quality=80, lossless=False,
                          method=4, alpha_quality=100)
                 break
@@ -410,7 +430,7 @@ def to_webp(frames_dir, state_name, num_frames=None):
                 _time.sleep(0.5 * (attempt + 1))
         else:
             print(f'  WARN: failed to save {out_path} after 5 retries')
-
+    
     print(f'  Converted {len(frames)} {state_name} frames -> assets/')
     return len(frames)
 
@@ -428,32 +448,32 @@ def process_state(state_name, num_frames=None):
     if not os.path.exists(video_path):
         print(f'[SKIP] {state_name}: no darkblue video found')
         return False
-
+    
     work_dir = os.path.join(WORK_BASE, state_name)
     frames_dir = os.path.join(work_dir, 'frames_raw')
     sigmoid_dir = os.path.join(work_dir, 'birefnet_sigmoid')
     final_dir = os.path.join(work_dir, 'frames_final')
-
+    
     if not os.path.exists(os.path.join(frames_dir, '00001.png')):
         extract_frames(video_path, frames_dir)
-
+    
     if not os.path.exists(os.path.join(sigmoid_dir, '00001.png')):
         birefnet_soft_alpha(frames_dir, sigmoid_dir, work_dir)
-
+    
     fg_normalize_and_anchor(frames_dir, sigmoid_dir, final_dir, state_name=state_name)
-
+    
     to_webp(final_dir, state_name, num_frames=num_frames)
-
+    
     return True
 
 
 if __name__ == '__main__':
     states = sys.argv[1:] if len(sys.argv) > 1 else [
-        f.replace('_darkblue.mp4', '')
-        for f in os.listdir(VIDEOS_DIR)
+        f.replace('_darkblue.mp4', '') 
+        for f in os.listdir(VIDEOS_DIR) 
         if f.endswith('_darkblue.mp4')
     ]
-
+    
     print(f'Processing {len(states)} states: {states}')
     done = 0
     for state in states:

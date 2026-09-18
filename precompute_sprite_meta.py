@@ -6,7 +6,7 @@ Output: assets/sprite_meta.json (~186KB for 20 states × 121 frames)
 Used by _build_state streaming load to avoid loading all frames just to scan bbox.
 Reduces _build_state peak from 477MB (all raw frames) to ~3.6MB (1 frame at a time).
 
-Usage: env -u PYTHONPATH -u PYTHONHOME C:/Users/humac/anaconda3/python.exe precompute_sprite_meta.py
+Usage: python precompute_sprite_meta.py
 """
 import os, json
 import numpy as np
